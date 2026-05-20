@@ -149,12 +149,18 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
         Resource = [aws_dynamodb_table.state.arn]
       },
       {
-        Sid    = "LogGroup"
+        # Account-level — does not accept resource-level scoping.
+        Sid      = "LogGroupDescribe"
+        Effect   = "Allow"
+        Action   = ["logs:DescribeLogGroups"]
+        Resource = "*"
+      },
+      {
+        Sid    = "LogGroupRW"
         Effect = "Allow"
         Action = [
           "logs:CreateLogGroup",
           "logs:DeleteLogGroup",
-          "logs:DescribeLogGroups",
           "logs:PutRetentionPolicy",
           "logs:TagResource",
           "logs:UntagResource",
@@ -197,13 +203,19 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
         ]
       },
       {
-        Sid    = "SsmParamMetadata"
+        # Account-level — does not accept resource ARN.
+        Sid      = "SsmDescribe"
+        Effect   = "Allow"
+        Action   = ["ssm:DescribeParameters"]
+        Resource = "*"
+      },
+      {
+        Sid    = "SsmParamRW"
         Effect = "Allow"
         Action = [
           "ssm:GetParameter",
           "ssm:GetParameters",
           "ssm:GetParametersByPath",
-          "ssm:DescribeParameters",
           "ssm:PutParameter",
           "ssm:DeleteParameter",
           "ssm:ListTagsForResource",
