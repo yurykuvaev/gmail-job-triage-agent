@@ -64,10 +64,22 @@ logger = logging.getLogger("handler")
 # ---- secrets --------------------------------------------------------------
 
 
-def _load_secrets(secrets_arn: str) -> dict:
-    sm = boto3.client("secretsmanager")
-    raw = sm.get_secret_value(SecretId=secrets_arn)["SecretString"]
-    return json.loads(raw)
+def _load_secrets(param_path: str) -> dict:
+    """Fetch all SecureString parameters under `param_path` in one paginated call.
+
+    Returns a dict keyed by the last path segment (e.g. 'gmail_refresh_token').
+    """
+
+    ssm = boto3.client("ssm")
+    out: dict[str, str] = {}
+    paginator = ssm.get_paginator("get_parameters_by_path")
+    for page in paginator.paginate(
+        Path=param_path, WithDecryption=True, Recursive=False
+    ):
+        for p in page["Parameters"]:
+            key = p["Name"].rsplit("/", 1)[-1]
+            out[key] = p["Value"]
+    return out
 
 
 # ---- formatting -----------------------------------------------------------
@@ -140,10 +152,10 @@ def _lookback_hours(state_table: str) -> tuple[int, str]:
 
 def lambda_handler(event, context):
     started = time.monotonic()
-    secrets_arn = os.environ["SECRETS_ARN"]
+    param_path = os.environ["SSM_PARAM_PATH"]
     state_table = os.environ["STATE_TABLE_NAME"]
 
-    secrets = _load_secrets(secrets_arn)
+    secrets = _load_secrets(param_path)
     lookback, window_label = _lookback_hours(state_table)
     logger.info("run_start", extra={"window_hours": lookback, "window_label": window_label})
 

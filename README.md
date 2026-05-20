@@ -7,7 +7,7 @@ EventBridge (cron 12:00 UTC) -> Lambda (Python 3.12 arm64 container)
                                   -> Gmail API (read-only)
                                   -> Anthropic API (claude-sonnet-4-6)
                                   -> Telegram Bot API
-                                Secrets: AWS Secrets Manager
+                                Secrets: SSM Parameter Store (SecureString)
                                 State:   DynamoDB (TTL 30d)
 ```
 
@@ -22,6 +22,7 @@ I'm actively interviewing for Senior DevOps/SRE roles. My inbox is loud — recr
 - **`pyproject.toml` over `requirements.txt`** — single source of truth for metadata + deps + ruff config; pip and uv both read it.
 - **One Anthropic call, batched** — round-trip cost dominates token cost at this volume.
 - **DynamoDB on-demand** — < 1 KB per dedup record, on-demand is free at this scale and removes capacity planning.
+- **SSM Parameter Store SecureString over Secrets Manager** — same KMS-encrypted storage but free for Standard tier (≤ 4 KB, ≤ 10k params/account). One credential per parameter means rotation is one CLI command, not read-modify-write of a JSON blob.
 - **Terraform S3 backend (`tf-state-yury`, key `gmail-job-triage-agent/`)** — matches my standing convention across all personal projects.
 
 ---
@@ -52,7 +53,7 @@ pip install -e .
 python scripts\gmail_oauth_local.py C:\path\to\oauth_client.json
 ```
 
-A browser opens. Sign in with the same Gmail address you added as a test user. The script prints `gmail_client_id`, `gmail_client_secret`, `gmail_refresh_token` — keep them; they go into Secrets Manager.
+A browser opens. Sign in with the same Gmail address you added as a test user. The script prints `gmail_client_id`, `gmail_client_secret`, `gmail_refresh_token` — keep them; they go into three of the six SSM SecureString parameters (see §6).
 
 ### 3. Telegram bot
 
@@ -80,32 +81,45 @@ bash scripts/deploy.sh        # WSL or Git Bash; PowerShell users: run via `wsl 
 
 `deploy.sh` does:
 
-1. `terraform apply` with `image_uri=""` — creates ECR, Secrets Manager (placeholder), DynamoDB, IAM, log group, EventBridge rule.
+1. `terraform apply` with `image_uri=""` — creates ECR, six SSM SecureString parameters (placeholders), DynamoDB, IAM, log group, EventBridge rule.
 2. `docker buildx --platform linux/arm64 --push` to ECR.
 3. `terraform apply` again with the real image URI — creates the Lambda function and EventBridge target.
 
-### 6. Populate the secret
+### 6. Populate the credentials (SSM Parameter Store SecureString)
 
-The Terraform-managed secret starts with `REPLACE_ME` values. Populate it once:
+Credentials live in six separate SecureString parameters under `/email-agent/*`. Standard-tier SecureString is free and encrypted with the AWS-managed `alias/aws/ssm` KMS key.
+
+Populate them once (one command per value):
 
 ```powershell
-$secretArn = terraform -chdir=terraform output -raw secret_arn
-$payload = @{
-  anthropic_api_key   = "sk-ant-..."
-  gmail_client_id     = "...apps.googleusercontent.com"
-  gmail_client_secret = "GOCSPX-..."
-  gmail_refresh_token = "1//..."
-  telegram_bot_token  = "12345:ABC..."
-  telegram_chat_id    = "987654321"
-} | ConvertTo-Json
+$path = terraform -chdir=terraform output -raw ssm_param_path
 
-aws secretsmanager put-secret-value `
-  --secret-id $secretArn `
-  --secret-string $payload `
+aws ssm put-parameter --name "$path/anthropic_api_key"   --type SecureString --overwrite --value "sk-ant-..."                           --profile k8s-lab --region us-east-1
+aws ssm put-parameter --name "$path/gmail_client_id"     --type SecureString --overwrite --value "...apps.googleusercontent.com"        --profile k8s-lab --region us-east-1
+aws ssm put-parameter --name "$path/gmail_client_secret" --type SecureString --overwrite --value "GOCSPX-..."                           --profile k8s-lab --region us-east-1
+aws ssm put-parameter --name "$path/gmail_refresh_token" --type SecureString --overwrite --value "1//..."                               --profile k8s-lab --region us-east-1
+aws ssm put-parameter --name "$path/telegram_bot_token"  --type SecureString --overwrite --value "12345:ABC..."                         --profile k8s-lab --region us-east-1
+aws ssm put-parameter --name "$path/telegram_chat_id"    --type SecureString --overwrite --value "987654321"                            --profile k8s-lab --region us-east-1
+```
+
+The Terraform `value` attribute has `ignore_changes` set, so this won't fight with subsequent `terraform apply`.
+
+**Rotating one value later** (e.g. the weekly Gmail refresh token while the OAuth consent screen stays in Testing mode):
+
+```powershell
+$path = terraform -chdir=terraform output -raw ssm_param_path
+aws ssm put-parameter --name "$path/gmail_refresh_token" `
+  --type SecureString --overwrite --value "1//NEW_TOKEN" `
   --profile k8s-lab --region us-east-1
 ```
 
-The Terraform `secret_string` has `ignore_changes` set, so this won't fight with subsequent applies.
+One command, no read-modify-write, no JSON wrangling. The Lambda re-reads all six on every invoke, so the next run picks up the new value with no redeploy.
+
+**Verify what's stored** (without printing secret values — only the names):
+
+```powershell
+terraform -chdir=terraform output -json ssm_param_names | ConvertFrom-Json
+```
 
 ### 7. First invoke (14-day lookback)
 
@@ -152,7 +166,7 @@ Every run emits structured JSON with: `emails_fetched`, `emails_classified`, `em
 - **CloudWatch retention**: 14 days.
 - **DynamoDB**: pay-per-request, ~1 KB per record, TTL 30 days. Effectively free at < 100 emails/day.
 
-Rough monthly cost at ~30 emails/day: Lambda < $0.05, DynamoDB < $0.05, Secrets Manager $0.40, ECR storage $0.01, EventBridge free. Anthropic API is the dominant cost — call it ~$0.50/month for one batched Sonnet 4.6 call per day.
+Rough monthly cost at ~30 emails/day: Lambda < $0.05, DynamoDB < $0.05, SSM Parameter Store (Standard SecureString) **free**, ECR storage $0.01, EventBridge free. Anthropic API is the dominant cost — call it ~$0.50/month for one batched Sonnet 4.6 call per day. (Switched from Secrets Manager to SSM Parameter Store specifically to drop the $0.40/secret/month baseline.)
 
 ---
 

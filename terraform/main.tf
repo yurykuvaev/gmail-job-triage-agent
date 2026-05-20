@@ -55,30 +55,34 @@ resource "aws_ecr_lifecycle_policy" "lambda" {
   })
 }
 
-# ---- Secrets Manager ------------------------------------------------------
+# ---- SSM Parameter Store (SecureString) -----------------------------------
+# One parameter per credential, grouped under /${project_name}/.
+# Standard SecureString tier is free (<=4 KB, <=10k params/account) and uses
+# the AWS-managed `alias/aws/ssm` KMS key at no extra cost.
 
-resource "aws_secretsmanager_secret" "app" {
-  name                    = "${var.project_name}/credentials"
-  description             = "Anthropic + Gmail OAuth + Telegram bot credentials."
-  recovery_window_in_days = 0
+locals {
+  secret_keys = [
+    "anthropic_api_key",
+    "gmail_client_id",
+    "gmail_client_secret",
+    "gmail_refresh_token",
+    "telegram_bot_token",
+    "telegram_chat_id",
+  ]
+  ssm_path = "/${var.project_name}"
 }
 
-# Placeholder so terraform apply succeeds on a fresh account. Populate via:
-#   aws secretsmanager put-secret-value --secret-id <arn> --secret-string file://secret.json
-resource "aws_secretsmanager_secret_version" "placeholder" {
-  secret_id = aws_secretsmanager_secret.app.id
-  secret_string = jsonencode({
-    anthropic_api_key   = "REPLACE_ME"
-    gmail_client_id     = "REPLACE_ME"
-    gmail_client_secret = "REPLACE_ME"
-    gmail_refresh_token = "REPLACE_ME"
-    telegram_bot_token  = "REPLACE_ME"
-    telegram_chat_id    = "REPLACE_ME"
-  })
+resource "aws_ssm_parameter" "secret" {
+  for_each = toset(local.secret_keys)
+
+  name        = "${local.ssm_path}/${each.key}"
+  description = "Credential for gmail-job-triage-agent — populate via aws ssm put-parameter."
+  type        = "SecureString"
+  value       = "REPLACE_ME"
 
   lifecycle {
-    # Avoid clobbering real values on subsequent applies.
-    ignore_changes = [secret_string]
+    # Real values are populated out-of-band (see README §6) — never managed by TF.
+    ignore_changes = [value]
   }
 }
 
@@ -126,7 +130,7 @@ resource "aws_lambda_function" "agent" {
 
   environment {
     variables = {
-      SECRETS_ARN      = aws_secretsmanager_secret.app.arn
+      SSM_PARAM_PATH   = local.ssm_path
       STATE_TABLE_NAME = aws_dynamodb_table.state.name
       LOG_LEVEL        = var.log_level
     }

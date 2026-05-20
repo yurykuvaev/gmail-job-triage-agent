@@ -3,9 +3,14 @@ output "ecr_repository_url" {
   value       = aws_ecr_repository.lambda.repository_url
 }
 
-output "secret_arn" {
-  description = "Populate this secret with real credentials (see README)."
-  value       = aws_secretsmanager_secret.app.arn
+output "ssm_param_path" {
+  description = "SSM Parameter Store prefix holding the six credentials (populate via aws ssm put-parameter; see README §6)."
+  value       = local.ssm_path
+}
+
+output "ssm_param_names" {
+  description = "Full SSM parameter names that must be populated before the Lambda will run."
+  value       = sort([for p in aws_ssm_parameter.secret : p.name])
 }
 
 output "state_table_name" {

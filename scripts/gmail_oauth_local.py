@@ -6,8 +6,8 @@ Usage:
 Where oauth_client.json is the "Desktop app" OAuth client JSON downloaded
 from Google Cloud Console (APIs & Services -> Credentials).
 
-The refresh token printed at the end goes into AWS Secrets Manager.
-Never commit it.
+The refresh token printed at the end goes into AWS SSM Parameter Store
+(three SecureString parameters under /email-agent/). Never commit it.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def main() -> int:
     client_id = cfg.get("client_id", "")
     client_secret = cfg.get("client_secret", "")
 
-    print("\n--- Copy these into AWS Secrets Manager ---")
+    print("\n--- Upload each value with: aws ssm put-parameter --name /email-agent/<key> --type SecureString --overwrite --value <value> ---")
     print(json.dumps({
         "gmail_client_id":     client_id,
         "gmail_client_secret": client_secret,
