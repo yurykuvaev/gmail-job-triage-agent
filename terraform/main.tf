@@ -150,6 +150,18 @@ resource "aws_lambda_function" "agent" {
   ]
 }
 
+# Disable async-invoke retries. Default is 2, which means one failed invocation
+# (e.g. Lambda timeout during a backfill that exceeds 15 min) triggers two
+# AUTOMATIC re-runs that each burn full tokens + compute before giving up.
+# Better to fail fast and surface the issue.
+resource "aws_lambda_function_event_invoke_config" "agent" {
+  count = var.image_uri == "" ? 0 : 1
+
+  function_name                = aws_lambda_function.agent[0].function_name
+  maximum_retry_attempts       = 0
+  maximum_event_age_in_seconds = 60
+}
+
 # ---- EventBridge schedule -------------------------------------------------
 
 resource "aws_cloudwatch_event_rule" "daily" {

@@ -24,12 +24,13 @@ from .telegram_client import send_message
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
-# Hard cap on emails per invoke. This is an UPPER bound — a quiet day with 5
-# unseen emails classifies all 5; only the 14-day backfill or a busy week
-# actually hits the cap. Empirically each email is ~730 input tokens, so
-# 250 fits comfortably in Tier 1 (30k tok/min) given the inter-batch sleep
-# in classifier.py. Bump via env var, no code change needed.
-MAX_EMAILS_PER_RUN = int(os.getenv("MAX_EMAILS_PER_RUN", "250"))
+# Hard cap on emails per invoke. This is an UPPER bound; quiet days do less.
+# Sized to fit Lambda's 15-min hard timeout under Tier 1's 30k tokens/min
+# budget: empirically ~70s per 15-email batch (mix of normal calls and
+# rate-limit-triggered 65s sleeps), so 150 emails -> 10 batches -> ~12 min
+# with ~3 min of margin. Going higher (e.g. 250) timed out in production
+# and AWS retried the failed async invocation, doubling token spend.
+MAX_EMAILS_PER_RUN = int(os.getenv("MAX_EMAILS_PER_RUN", "150"))
 
 
 class _JsonFormatter(logging.Formatter):
