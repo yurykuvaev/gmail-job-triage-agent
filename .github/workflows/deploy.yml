@@ -1,0 +1,89 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'PROMPT.md'
+      - '.gitignore'
+      - 'docs/**'
+  workflow_dispatch: {}
+
+# OIDC requires id-token: write. Everything else is read-only.
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT_NAME: email-agent
+  # Hardcoded because the workflow needs the ARN BEFORE Terraform runs.
+  # If you re-deploy in a different account, update this value (and run the
+  # local bootstrap apply against the new account first).
+  AWS_DEPLOY_ROLE: arn:aws:iam::748415433090:role/email-agent-gha-deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute image URI
+        id: img
+        run: |
+          REPO_URL=$(aws ecr describe-repositories \
+            --repository-names "$PROJECT_NAME" \
+            --query 'repositories[0].repositoryUri' \
+            --output text)
+          TAG="${GITHUB_SHA::7}"
+          echo "uri=${REPO_URL}:${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image will be: ${REPO_URL}:${TAG}"
+
+      - name: Build and push arm64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.img.outputs.uri }}
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.0
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: ./terraform
+        run: terraform init -input=false
+
+      - name: Terraform apply
+        working-directory: ./terraform
+        run: |
+          terraform apply -auto-approve -input=false \
+            -var "image_uri=${{ steps.img.outputs.uri }}"
+
+      - name: Summary
+        if: success()
+        run: |
+          echo "## Deploy succeeded :white_check_mark:" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image: \`${{ steps.img.outputs.uri }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Trigger a manual run with: \`aws lambda invoke --function-name $PROJECT_NAME --profile k8s-lab /tmp/out.json\`" >> "$GITHUB_STEP_SUMMARY"

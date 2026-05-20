@@ -1,7 +1,7 @@
 project_name = "email-agent"
 aws_region   = "us-east-1"
 
-# Set after the first image push (deploy.sh handles this for you).
+# Keep empty for the local bootstrap apply. GitHub Actions sets this from the build it produces.
 image_uri = ""
 
 # 12:00 UTC = 08:00 Miami EDT / 07:00 EST.

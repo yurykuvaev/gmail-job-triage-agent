@@ -3,6 +3,10 @@
 Serverless agent that reads my Gmail, classifies job-search emails with Claude Sonnet 4.6, and posts a daily summary to Telegram. Deployed to AWS with Terraform.
 
 ```
+GitHub push -> GitHub Actions (OIDC role assumption, no static AWS keys)
+                  -> docker buildx (linux/arm64) -> ECR
+                  -> terraform apply -> Lambda function updated
+
 EventBridge (cron 12:00 UTC) -> Lambda (Python 3.12 arm64 container)
                                   -> Gmail API (read-only)
                                   -> Anthropic API (claude-sonnet-4-6)
@@ -24,6 +28,7 @@ I'm actively interviewing for Senior DevOps/SRE roles. My inbox is loud — recr
 - **DynamoDB on-demand** — < 1 KB per dedup record, on-demand is free at this scale and removes capacity planning.
 - **SSM Parameter Store SecureString over Secrets Manager** — same KMS-encrypted storage but free for Standard tier (≤ 4 KB, ≤ 10k params/account). One credential per parameter means rotation is one CLI command, not read-modify-write of a JSON blob.
 - **Terraform S3 backend (`tf-state-yury`, key `gmail-job-triage-agent/`)** — matches my standing convention across all personal projects.
+- **GitHub Actions + OIDC, not local builds** — every push to `main` builds and deploys. Zero long-lived AWS keys in CI: the workflow assumes an IAM role via short-lived OIDC tokens, scoped by `sub` claim to this exact repo and branch.
 
 ---
 
@@ -64,26 +69,42 @@ A browser opens. Sign in with the same Gmail address you added as a test user. T
 
 ### 4. AWS prerequisites
 
-- `~/.aws/credentials` with profile `k8s-lab` (or override `AWS_PROFILE`).
+- `~/.aws/credentials` with profile `k8s-lab` (or override `AWS_PROFILE`) — only needed for the one-time local bootstrap below.
 - S3 bucket `tf-state-yury` already exists (personal convention).
-- Docker Desktop running (buildx required to cross-build arm64 from x86 hosts).
+- **No Docker needed locally** — image builds happen in GitHub Actions on Ubuntu runners.
 
-### 5. Deploy
+### 5. Deploy (two phases, only the first is manual)
+
+#### 5a. One-time local bootstrap — create the OIDC role GitHub Actions will assume
 
 ```powershell
 cd terraform
 Copy-Item terraform.tfvars.example terraform.tfvars
-# edit if needed — defaults are sensible
-
-cd ..
-bash scripts/deploy.sh        # WSL or Git Bash; PowerShell users: run via `wsl bash ...`
+terraform init
+terraform apply -var "image_uri="
 ```
 
-`deploy.sh` does:
+This creates the OIDC provider (if not present), the `email-agent-gha-deploy` IAM role (trust policy pinned to `yurykuvaev/gmail-job-triage-agent` branch `main`), and the rest of the always-on infra (ECR repo, DynamoDB, log group, EventBridge rule, six SSM params). Lambda is intentionally NOT created here (`image_uri=""` → count = 0) — GHA will create it on the first push.
 
-1. `terraform apply` with `image_uri=""` — creates ECR, six SSM SecureString parameters (placeholders), DynamoDB, IAM, log group, EventBridge rule.
-2. `docker buildx --platform linux/arm64 --push` to ECR.
-3. `terraform apply` again with the real image URI — creates the Lambda function and EventBridge target.
+**If `aws_iam_openid_connect_provider.github` errors with "already exists"** (because another personal project of yours already created the GitHub OIDC provider in this account), import it instead and re-run apply:
+
+```powershell
+terraform import aws_iam_openid_connect_provider.github `
+  "arn:aws:iam::748415433090:oidc-provider/token.actions.githubusercontent.com"
+terraform apply -var "image_uri="
+```
+
+#### 5b. Push to main — every push deploys
+
+`.github/workflows/deploy.yml` runs on every push to `main` (paths-ignored: `README.md`, `PROMPT.md`, `.gitignore`). The workflow:
+
+1. Assumes the deploy role via OIDC (no static AWS keys anywhere in the repo or repo secrets).
+2. Logs into ECR and runs `docker buildx build --platform linux/arm64 --push`.
+3. Runs `terraform apply` with the freshly built image URI — Lambda is created or updated.
+
+The first push triggers a cold deploy (creates the Lambda function); every subsequent push is an update. Tail it at `https://github.com/yurykuvaev/gmail-job-triage-agent/actions`.
+
+**Manually trigger a redeploy without code changes**: Actions tab → "deploy" workflow → **Run workflow** → main.
 
 ### 6. Populate the credentials (SSM Parameter Store SecureString)
 
@@ -154,7 +175,7 @@ Every run emits structured JSON with: `emails_fetched`, `emails_classified`, `em
 | Telegram: `chat not found` | You haven't sent at least one message to the bot yet, so the bot can't initiate the chat. |
 | Lambda timeout | First 14-day run on a busy inbox can be slow. Bump `timeout` in Terraform (still under the 900s ceiling) or reduce `max_results` in `gmail_client.py`. |
 | Classifier JSON parse failures | One retry with a stricter reminder is built in. If you see repeated failures in CloudWatch, capture the offending response and tighten `SYSTEM_PROMPT`. |
-| `terraform apply` fails on `image_uri` | Run `scripts/deploy.sh` instead — it does the two-phase apply for you. |
+| `terraform apply` errors on Lambda image_uri | You ran a manual `terraform apply` without setting `-var "image_uri=..."`. Either pass `-var "image_uri="` (bootstrap; Lambda is skipped) or let GitHub Actions handle the apply. |
 
 ---
 

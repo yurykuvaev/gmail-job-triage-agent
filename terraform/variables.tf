@@ -11,7 +11,7 @@ variable "aws_region" {
 }
 
 variable "image_uri" {
-  description = "Full ECR image URI for the Lambda container (e.g. <acct>.dkr.ecr.<region>.amazonaws.com/email-agent:<tag>). Empty on first apply; deploy.sh updates it after the first image push."
+  description = "Full ECR image URI for the Lambda container (e.g. <acct>.dkr.ecr.<region>.amazonaws.com/email-agent:<tag>). Empty during the local bootstrap apply; GitHub Actions sets it on every push."
   type        = string
   default     = ""
 }
