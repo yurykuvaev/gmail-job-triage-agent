@@ -21,10 +21,17 @@ from .prompts import CATEGORIES, SYSTEM_PROMPT
 logger = logging.getLogger(__name__)
 
 MODEL_ID = "claude-sonnet-4-6"
-MAX_BATCH = 30
+# Sized to fit in Anthropic Tier 1 input-token-per-minute budget (30k).
+# ~15 emails * ~1300 tokens each ≈ 20k per call, leaves headroom + system prompt.
+MAX_BATCH = 15
 TOKEN_HARD_CAP = 200_000
-# rough heuristic: ~4 chars per token; used only to decide whether to chunk.
-TOKEN_SOFT_CAP = 150_000
+TOKEN_SOFT_CAP = 25_000
+
+# How long to wait when we hit a 429. The token bucket window is one minute,
+# so anything under that won't help; 65s gives a safety margin.
+RATE_LIMIT_SLEEP_SEC = 65
+# Polite pause between successful batches to spread token usage across the minute.
+INTER_BATCH_SLEEP_SEC = 4
 
 
 class Classified(BaseModel):
@@ -96,12 +103,17 @@ def _call_once(
 def _classify_batch(
     client: Anthropic, batch: list[dict]
 ) -> tuple[list[Classified], int, int]:
-    """One batch, with a single retry on parse failure."""
+    """One batch with bounded retries.
+
+    - Parse failures: retry with a stricter reminder.
+    - 429 rate limits: sleep for a full token-bucket window before retrying.
+    - Other API errors: short exponential backoff.
+    """
 
     attempts = 0
     last_err: Exception | None = None
-    backoff = 1.0
-    while attempts < 3:
+    backoff = 2.0
+    while attempts < 4:
         try:
             return _call_once(client, batch, strict_reminder=attempts > 0)
         except (json.JSONDecodeError, ValueError, ValidationError) as e:
@@ -109,9 +121,20 @@ def _classify_batch(
             logger.warning("classifier_parse_retry", extra={"attempt": attempts, "err": str(e)})
         except APIError as e:
             last_err = e
-            logger.warning("classifier_api_retry", extra={"attempt": attempts, "err": str(e)})
-            time.sleep(backoff)
-            backoff *= 2
+            status = getattr(e, "status_code", None)
+            if status == 429:
+                logger.warning(
+                    "classifier_rate_limit",
+                    extra={"attempt": attempts, "sleep_sec": RATE_LIMIT_SLEEP_SEC},
+                )
+                time.sleep(RATE_LIMIT_SLEEP_SEC)
+            else:
+                logger.warning(
+                    "classifier_api_retry",
+                    extra={"attempt": attempts, "err": str(e), "sleep_sec": backoff},
+                )
+                time.sleep(backoff)
+                backoff *= 2
         attempts += 1
     raise RuntimeError(f"classifier failed after {attempts} attempts") from last_err
 
@@ -132,13 +155,18 @@ def classify_emails(client: Anthropic, emails: list[FetchedEmail]) -> ClassifyRe
         )
         prompt_dicts = prompt_dicts[:MAX_BATCH]
 
-    # chunk to MAX_BATCH if soft cap exceeded, otherwise send in one shot.
-    chunk_size = MAX_BATCH if approx > TOKEN_SOFT_CAP else len(prompt_dicts) or 1
+    # Always chunk to MAX_BATCH so we never blow past Tier 1's 30k tokens/min
+    # limit on a single call. Daily runs (~30 emails) become 2 batches with a
+    # small inter-batch sleep — negligible. Backfill (~200) becomes 14 batches.
+    chunk_size = MAX_BATCH
 
-    for i in range(0, len(prompt_dicts), chunk_size):
-        batch = prompt_dicts[i : i + chunk_size]
+    batches = [prompt_dicts[i : i + chunk_size] for i in range(0, len(prompt_dicts), chunk_size)]
+    for idx, batch in enumerate(batches):
         if not batch:
             continue
+        if idx > 0:
+            # Spread token spend across the rate-limit window.
+            time.sleep(INTER_BATCH_SLEEP_SEC)
         results, ti, to = _classify_batch(client, batch)
         items.extend(results)
         tokens_in += ti

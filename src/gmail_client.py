@@ -21,7 +21,9 @@ from googleapiclient.discovery import build
 logger = logging.getLogger(__name__)
 
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
-MAX_BODY_CHARS = 4000
+# Trimmed to stay within Anthropic Tier 1 rate limit (30k input tokens/min).
+# Subject + sender + date metadata is preserved separately; this only bounds body.
+MAX_BODY_CHARS = 1500
 
 
 @dataclass

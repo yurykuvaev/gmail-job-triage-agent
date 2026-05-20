@@ -132,7 +132,8 @@ resource "aws_lambda_function" "agent" {
   image_uri     = var.image_uri
   architectures = ["arm64"]
   memory_size   = 512
-  timeout       = 300
+  # 14-day backfill with rate-limit-respecting batches needs more than 5 min.
+  timeout = 600
 
   environment {
     variables = {
