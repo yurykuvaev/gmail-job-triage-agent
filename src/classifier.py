@@ -29,7 +29,9 @@ TOKEN_HARD_CAP = 200_000
 # don't help since the bucket is a sliding 60-second sum.
 RATE_LIMIT_SLEEP_SEC = 65
 # Proactively spread token spend so we don't trip the bucket in the first place.
-INTER_BATCH_SLEEP_SEC = 35
+# Empirically ~730 tokens/email * 15 batch = ~11k tokens, well under the 30k
+# per-minute budget, so 25s between batches leaves margin without being slow.
+INTER_BATCH_SLEEP_SEC = 25
 
 
 class Classified(BaseModel):

@@ -132,8 +132,9 @@ resource "aws_lambda_function" "agent" {
   image_uri     = var.image_uri
   architectures = ["arm64"]
   memory_size   = 512
-  # 14-day backfill with rate-limit-respecting batches needs more than 5 min.
-  timeout = 600
+  # AWS Lambda max. A 250-email backfill with rate-limit-respecting batches
+  # takes roughly 7-8 minutes; this gives margin for slow Gmail pagination.
+  timeout = 900
 
   environment {
     variables = {

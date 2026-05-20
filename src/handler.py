@@ -24,12 +24,12 @@ from .telegram_client import send_message
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
-# Hard cap on emails sent to the classifier per invoke. Tier 1 of the Anthropic
-# API (30k input tokens / minute) can only safely classify ~20-30 emails per
-# run inside Lambda's timeout. Older unclassified emails are NOT requeued —
-# they get marked as processed so subsequent runs don't waste tokens re-checking
-# them. For job-search triage the most-recent N matter most anyway.
-MAX_EMAILS_PER_RUN = int(os.getenv("MAX_EMAILS_PER_RUN", "20"))
+# Hard cap on emails per invoke. This is an UPPER bound — a quiet day with 5
+# unseen emails classifies all 5; only the 14-day backfill or a busy week
+# actually hits the cap. Empirically each email is ~730 input tokens, so
+# 250 fits comfortably in Tier 1 (30k tok/min) given the inter-batch sleep
+# in classifier.py. Bump via env var, no code change needed.
+MAX_EMAILS_PER_RUN = int(os.getenv("MAX_EMAILS_PER_RUN", "250"))
 
 
 class _JsonFormatter(logging.Formatter):
