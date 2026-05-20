@@ -21,17 +21,15 @@ from .prompts import CATEGORIES, SYSTEM_PROMPT
 logger = logging.getLogger(__name__)
 
 MODEL_ID = "claude-sonnet-4-6"
-# Sized to fit in Anthropic Tier 1 input-token-per-minute budget (30k).
-# ~15 emails * ~1300 tokens each ≈ 20k per call, leaves headroom + system prompt.
+# Sized for Anthropic Tier 1: 30k input tokens/min. ~15 emails * ~1300 tokens
+# ≈ 20k per call. Two batches per minute (~30s apart) keeps us under budget.
 MAX_BATCH = 15
 TOKEN_HARD_CAP = 200_000
-TOKEN_SOFT_CAP = 25_000
-
-# How long to wait when we hit a 429. The token bucket window is one minute,
-# so anything under that won't help; 65s gives a safety margin.
+# Wait a full token-bucket window (60s) after a 429 — sub-minute waits
+# don't help since the bucket is a sliding 60-second sum.
 RATE_LIMIT_SLEEP_SEC = 65
-# Polite pause between successful batches to spread token usage across the minute.
-INTER_BATCH_SLEEP_SEC = 4
+# Proactively spread token spend so we don't trip the bucket in the first place.
+INTER_BATCH_SLEEP_SEC = 35
 
 
 class Classified(BaseModel):
@@ -155,9 +153,9 @@ def classify_emails(client: Anthropic, emails: list[FetchedEmail]) -> ClassifyRe
         )
         prompt_dicts = prompt_dicts[:MAX_BATCH]
 
-    # Always chunk to MAX_BATCH so we never blow past Tier 1's 30k tokens/min
-    # limit on a single call. Daily runs (~30 emails) become 2 batches with a
-    # small inter-batch sleep — negligible. Backfill (~200) becomes 14 batches.
+    # Always chunk to MAX_BATCH. Daily runs typically fit in one batch with
+    # no inter-batch sleep; the 14-day backfill is capped upstream (handler.py)
+    # so it doesn't grow unbounded.
     chunk_size = MAX_BATCH
 
     batches = [prompt_dicts[i : i + chunk_size] for i in range(0, len(prompt_dicts), chunk_size)]

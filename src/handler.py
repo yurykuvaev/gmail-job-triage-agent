@@ -24,6 +24,13 @@ from .telegram_client import send_message
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
+# Hard cap on emails sent to the classifier per invoke. Tier 1 of the Anthropic
+# API (30k input tokens / minute) can only safely classify ~20-30 emails per
+# run inside Lambda's timeout. Older unclassified emails are NOT requeued —
+# they get marked as processed so subsequent runs don't waste tokens re-checking
+# them. For job-search triage the most-recent N matter most anyway.
+MAX_EMAILS_PER_RUN = int(os.getenv("MAX_EMAILS_PER_RUN", "20"))
+
 
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -164,25 +171,40 @@ def lambda_handler(event, context):
         secrets["gmail_client_secret"],
         secrets["gmail_refresh_token"],
     )
-    fetched: list[FetchedEmail] = fetch_recent_emails(creds, lookback_hours=lookback)
+    # Cap fetch — Anthropic Tier 1 (30k input tok/min) can only realistically
+    # classify a few dozen emails per invoke without sleeping past Lambda's
+    # timeout. Fetching more than we'll classify just burns Gmail API quota.
+    max_to_fetch = MAX_EMAILS_PER_RUN * 3
+    fetched: list[FetchedEmail] = fetch_recent_emails(
+        creds, lookback_hours=lookback, max_results=max_to_fetch
+    )
+    # Newest first so the cap drops the oldest, least-actionable mail.
+    fetched.sort(key=lambda e: e.received_at, reverse=True)
 
     all_ids = [e.id for e in fetched]
     unseen_ids = filter_unseen(state_table, all_ids)
-    to_classify = [e for e in fetched if e.id in unseen_ids]
-    skipped_dedup = len(fetched) - len(to_classify)
+    unseen = [e for e in fetched if e.id in unseen_ids]
+    to_classify = unseen[:MAX_EMAILS_PER_RUN]
+    capped = len(unseen) - len(to_classify)
+    skipped_dedup = len(fetched) - len(unseen)
+    if capped:
+        logger.info(
+            "run_capped",
+            extra={"unseen": len(unseen), "classifying": len(to_classify), "dropped": capped},
+        )
 
     if not to_classify:
         logger.info("run_no_new_emails", extra={"fetched": len(fetched)})
-        send_message(
-            secrets["telegram_bot_token"],
-            secrets["telegram_chat_id"],
-            format_summary([], scanned=len(fetched), window_label=window_label),
-        )
         mark_processed(state_table, all_ids)
         mark_bootstrapped(state_table)
-        return _result(len(fetched), 0, skipped_dedup, 0, 0, 1, started)
+        # No Telegram ping when there's nothing to report — empty summaries
+        # are noise. Cron will fire again tomorrow.
+        return _result(len(fetched), 0, skipped_dedup, 0, 0, 0, started)
 
-    client = Anthropic(api_key=secrets["anthropic_api_key"])
+    # max_retries=0: rate-limit retries are useless because the SDK's
+    # millisecond-scale exponential backoff can't outwait a 60s sliding
+    # window. Our own classifier.py retries with the correct 65s sleep.
+    client = Anthropic(api_key=secrets["anthropic_api_key"], max_retries=0)
     cls = classify_emails(client, to_classify)
 
     text = format_summary(cls.items, scanned=len(fetched), window_label=window_label)
@@ -190,7 +212,10 @@ def lambda_handler(event, context):
         secrets["telegram_bot_token"], secrets["telegram_chat_id"], text
     )
 
-    mark_processed(state_table, [e.id for e in to_classify])
+    # Mark every fetched email — including ones we dropped due to the cap —
+    # so they aren't re-fetched next run. The dropped ones are gone for good;
+    # for job-search triage that's acceptable since stale emails matter less.
+    mark_processed(state_table, all_ids)
     mark_bootstrapped(state_table)
 
     return _result(
