@@ -78,6 +78,7 @@ A browser opens. Sign in with the same Gmail address you added as a test user. T
 #### 5a. One-time local bootstrap — create the OIDC role GitHub Actions will assume
 
 ```powershell
+$env:AWS_PROFILE = "k8s-lab"      # backend + provider read this; no profile is hardcoded in main.tf
 cd terraform
 Copy-Item terraform.tfvars.example terraform.tfvars
 terraform init

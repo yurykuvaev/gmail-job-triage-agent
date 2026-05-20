@@ -9,18 +9,19 @@ terraform {
   }
 
   # Matches the personal convention: tf-state bucket, key per project.
+  # Credentials come from the standard AWS provider chain (env vars first,
+  # then ~/.aws/credentials). Locally: set $env:AWS_PROFILE = "k8s-lab".
+  # In GitHub Actions: OIDC-assumed creds are injected as env vars.
   backend "s3" {
     bucket  = "tf-state-yury"
     key     = "gmail-job-triage-agent/terraform.tfstate"
     region  = "us-east-1"
-    profile = "k8s-lab"
     encrypt = true
   }
 }
 
 provider "aws" {
-  region  = var.aws_region
-  profile = "k8s-lab"
+  region = var.aws_region
 
   default_tags {
     tags = var.tags
