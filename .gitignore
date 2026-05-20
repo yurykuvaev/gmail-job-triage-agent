@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Terraform (commit .terraform.lock.hcl per Hashicorp convention)
+terraform/.terraform/
+terraform/terraform.tfvars
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/crash.log
+
+# Secrets / local
+.env
+.env.*
+*.pem
+oauth_client*.json
+secret.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,11 @@
+project_name = "email-agent"
+aws_region   = "us-east-1"
+
+# Set after the first image push (deploy.sh handles this for you).
+image_uri = ""
+
+# 12:00 UTC = 08:00 Miami EDT / 07:00 EST.
+schedule_expression = "cron(0 12 * * ? *)"
+
+log_retention_days = 14
+log_level          = "INFO"

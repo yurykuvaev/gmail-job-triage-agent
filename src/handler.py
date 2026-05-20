@@ -1,0 +1,215 @@
+"""Lambda entry point.
+
+Orchestrates: secrets -> window -> fetch -> dedup -> classify -> format -> send -> mark.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+import time
+from datetime import datetime, timezone
+
+import boto3
+from anthropic import Anthropic
+
+from .classifier import Classified, classify_emails
+from .gmail_client import FetchedEmail, build_credentials, fetch_recent_emails
+from .state import filter_unseen, is_first_run, mark_bootstrapped, mark_processed
+from .telegram_client import send_message
+
+# ---- logging: structured JSON to stdout ----------------------------------
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "level": record.levelname,
+            "msg": record.getMessage(),
+            "ts": datetime.now(tz=timezone.utc).isoformat(),
+            "logger": record.name,
+        }
+        for k, v in record.__dict__.items():
+            if k in payload or k.startswith("_") or k in logging.LogRecord.__dict__:
+                continue
+            if k in ("args", "msg", "levelname", "name", "exc_info", "exc_text",
+                    "stack_info", "lineno", "pathname", "filename", "module",
+                    "msecs", "relativeCreated", "thread", "threadName",
+                    "processName", "process", "created", "funcName"):
+                continue
+            payload[k] = v
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        return json.dumps(payload, default=str)
+
+
+def _setup_logging() -> None:
+    root = logging.getLogger()
+    root.setLevel(LOG_LEVEL)
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(_JsonFormatter())
+    root.addHandler(handler)
+
+
+_setup_logging()
+logger = logging.getLogger("handler")
+
+
+# ---- secrets --------------------------------------------------------------
+
+
+def _load_secrets(secrets_arn: str) -> dict:
+    sm = boto3.client("secretsmanager")
+    raw = sm.get_secret_value(SecretId=secrets_arn)["SecretString"]
+    return json.loads(raw)
+
+
+# ---- formatting -----------------------------------------------------------
+
+SECTION_ORDER = [
+    ("interview_invite", "🎯 Interviews"),
+    ("rejection", "❌ Rejections"),
+    ("recruiter_outreach", "📞 Recruiter outreach"),
+    ("followup_needed", "⏰ Action needed"),
+    ("application_received", "✅ Applications confirmed"),
+]
+
+
+def _fmt_line(item: Classified) -> str:
+    parts = [item.company or "Unknown company"]
+    if item.role:
+        parts.append(item.role)
+    if item.category in ("interview_invite", "followup_needed"):
+        if item.next_step:
+            parts.append(item.next_step)
+        if item.deadline:
+            parts.append(item.deadline)
+    if item.category == "recruiter_outreach" and item.link:
+        parts.append(item.link)
+    return "- " + " — ".join(p for p in parts if p)
+
+
+def format_summary(
+    items: list[Classified], scanned: int, window_label: str
+) -> str:
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    lines = [
+        f"📬 *Job Search Summary — {today}*",
+        f"_Scanned {scanned} emails over last {window_label}_",
+        "",
+    ]
+    by_cat: dict[str, list[Classified]] = {}
+    for it in items:
+        by_cat.setdefault(it.category, []).append(it)
+
+    for cat, header in SECTION_ORDER:
+        bucket = by_cat.get(cat, [])
+        if not bucket:
+            continue
+        lines.append(f"*{header} ({len(bucket)})*")
+        for it in bucket:
+            lines.append(_fmt_line(it))
+        lines.append("")
+
+    other = len(by_cat.get("other", []))
+    if other:
+        lines.append(f"_{other} other emails skipped._")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+# ---- window selection -----------------------------------------------------
+
+
+def _lookback_hours(state_table: str) -> tuple[int, str]:
+    """First run -> 14d, otherwise -> 24h. Uses a sentinel GetItem (no Scan permission needed)."""
+
+    if is_first_run(state_table):
+        return 24 * 14, "14 days"
+    return 24, "24 hours"
+
+
+# ---- lambda entry ---------------------------------------------------------
+
+
+def lambda_handler(event, context):
+    started = time.monotonic()
+    secrets_arn = os.environ["SECRETS_ARN"]
+    state_table = os.environ["STATE_TABLE_NAME"]
+
+    secrets = _load_secrets(secrets_arn)
+    lookback, window_label = _lookback_hours(state_table)
+    logger.info("run_start", extra={"window_hours": lookback, "window_label": window_label})
+
+    creds = build_credentials(
+        secrets["gmail_client_id"],
+        secrets["gmail_client_secret"],
+        secrets["gmail_refresh_token"],
+    )
+    fetched: list[FetchedEmail] = fetch_recent_emails(creds, lookback_hours=lookback)
+
+    all_ids = [e.id for e in fetched]
+    unseen_ids = filter_unseen(state_table, all_ids)
+    to_classify = [e for e in fetched if e.id in unseen_ids]
+    skipped_dedup = len(fetched) - len(to_classify)
+
+    if not to_classify:
+        logger.info("run_no_new_emails", extra={"fetched": len(fetched)})
+        send_message(
+            secrets["telegram_bot_token"],
+            secrets["telegram_chat_id"],
+            format_summary([], scanned=len(fetched), window_label=window_label),
+        )
+        mark_processed(state_table, all_ids)
+        mark_bootstrapped(state_table)
+        return _result(len(fetched), 0, skipped_dedup, 0, 0, 1, started)
+
+    client = Anthropic(api_key=secrets["anthropic_api_key"])
+    cls = classify_emails(client, to_classify)
+
+    text = format_summary(cls.items, scanned=len(fetched), window_label=window_label)
+    chunks = send_message(
+        secrets["telegram_bot_token"], secrets["telegram_chat_id"], text
+    )
+
+    mark_processed(state_table, [e.id for e in to_classify])
+    mark_bootstrapped(state_table)
+
+    return _result(
+        len(fetched),
+        len(cls.items),
+        skipped_dedup,
+        cls.tokens_input,
+        cls.tokens_output,
+        chunks,
+        started,
+    )
+
+
+def _result(
+    fetched: int,
+    classified: int,
+    skipped_dedup: int,
+    tokens_in: int,
+    tokens_out: int,
+    telegram_sent: int,
+    started: float,
+) -> dict:
+    duration_ms = int((time.monotonic() - started) * 1000)
+    payload = {
+        "emails_fetched": fetched,
+        "emails_classified": classified,
+        "emails_skipped_dedup": skipped_dedup,
+        "tokens_input": tokens_in,
+        "tokens_output": tokens_out,
+        "telegram_sent": telegram_sent,
+        "duration_ms": duration_ms,
+    }
+    logger.info("run_done", extra=payload)
+    return payload
