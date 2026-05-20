@@ -30,8 +30,12 @@ resource "aws_iam_role_policy" "lambda" {
           "ssm:GetParameter",
           "ssm:GetParameters",
         ]
+        # GetParametersByPath checks IAM against the PATH itself (no trailing
+        # children component), while GetParameter checks against the child
+        # ARN. Both need to be allowed.
         Resource = [
-          "arn:aws:ssm:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_path}/*"
+          "arn:aws:ssm:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_path}",
+          "arn:aws:ssm:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_path}/*",
         ]
       },
       {
