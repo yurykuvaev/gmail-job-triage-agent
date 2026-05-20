@@ -73,13 +73,18 @@ resource "aws_iam_role_policy" "github_actions_deploy" {
           "s3:PutObject",
           "s3:DeleteObject"
         ]
-        Resource = ["arn:aws:s3:::tf-state-yury/${var.project_name}/*"]
+        Resource = ["arn:aws:s3:::${local.tfstate_bucket}/${local.tfstate_prefix}/*"]
       },
       {
         Sid      = "TerraformStateListBucket"
         Effect   = "Allow"
         Action   = ["s3:ListBucket"]
-        Resource = ["arn:aws:s3:::tf-state-yury"]
+        Resource = ["arn:aws:s3:::${local.tfstate_bucket}"]
+        Condition = {
+          StringLike = {
+            "s3:prefix" = ["${local.tfstate_prefix}/*", "${local.tfstate_prefix}"]
+          }
+        }
       },
       {
         Sid      = "EcrAuth"

@@ -71,6 +71,11 @@ locals {
     "telegram_chat_id",
   ]
   ssm_path = "/${var.project_name}"
+
+  # Must match the backend "s3" key above. Surfaced as a local so the
+  # github_actions.tf IAM policy can grant access to exactly this prefix.
+  tfstate_bucket = "tf-state-yury"
+  tfstate_prefix = "gmail-job-triage-agent"
 }
 
 resource "aws_ssm_parameter" "secret" {
